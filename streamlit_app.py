@@ -14,6 +14,8 @@ from pathlib import Path
 from io import BytesIO
 import time
 
+import db  # Supabase 연동 (없으면 자동으로 session_state 폴백)
+
 # ============================================================
 # 페이지 설정
 # ============================================================
@@ -332,6 +334,10 @@ def get_auto_response(analysis: dict) -> str:
 # ============================================================
 def init_session():
     defaults = {
+        # 인증
+        "auth_user": None,         # {"user_id", "email", "display_name"} 또는 None
+        "auth_mode": "login",       # "login" or "signup"
+        # 앱 상태
         "role": None,
         "user_id": None,
         "chat_messages": [],
@@ -339,11 +345,144 @@ def init_session():
         "blocked_users": set(),
         "current_emotion": 1,
         "stats": {"total": 0, "profanity": 0,
-                  "types": {t: 0 for t in ABUSE_TYPES.keys()}}
+                  "types": {t: 0 for t in ABUSE_TYPES.keys()}},
+        "db_loaded": False,         # 로그인 직후 DB → session_state 1회 동기화 플래그
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def _hydrate_from_db():
+    """로그인 직후 DB에서 채팅/보관함/차단 목록을 한 번 불러와 session_state에 채운다.
+    DB 미설정/실패 시에는 그대로 빈 상태(또는 기존 session_state) 사용.
+    """
+    if st.session_state.get("db_loaded"):
+        return
+    if not db.is_enabled():
+        st.session_state.db_loaded = True
+        return
+
+    ok_msgs, msgs = db.fetch_messages(limit=200)
+    if ok_msgs and msgs:
+        st.session_state.chat_messages = msgs
+
+    ok_arc, arc = db.fetch_archive()
+    if ok_arc and arc:
+        st.session_state.archive = arc
+        # 통계 재집계
+        stats = {"total": len(msgs) if ok_msgs else 0,
+                 "profanity": len(arc),
+                 "types": {t: 0 for t in ABUSE_TYPES.keys()}}
+        for m in arc:
+            for t in m.get("analysis", {}).get("types_detected", []):
+                if t in stats["types"]:
+                    stats["types"][t] += 1
+        st.session_state.stats = stats
+        levels = [m.get("emotion_level", 1) for m in (msgs or [])
+                  if m.get("role") == "parent"][-5:]
+        st.session_state.current_emotion = max(levels) if levels else 1
+
+    user = st.session_state.auth_user or {}
+    if user.get("user_id"):
+        ok_b, blocked = db.fetch_blocked_users(user["user_id"])
+        if ok_b:
+            st.session_state.blocked_users = blocked
+
+    st.session_state.db_loaded = True
+
+
+# ============================================================
+# 페이지 0: 로그인 / 회원가입
+# ============================================================
+def page_auth():
+    st.markdown("""
+    <div class="yellow-page">
+        <div style="font-size:72px; margin-bottom:10px;">🛡️</div>
+        <h1 style="font-size:30px; font-weight:800; color:#1a1a2e; margin-bottom:6px;">
+            티쳐가드 (TeacherGuard)
+        </h1>
+        <p style="font-size:15px; color:#555; margin-bottom:10px;">
+            선생님을 지키는 AI · 건강한 소통을 위한 스마트 필터
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not db.is_enabled():
+        st.warning(
+            "⚠️ Supabase가 아직 설정되지 않았습니다. "
+            "`SUPABASE_SETUP.md`를 참고해 `.streamlit/secrets.toml`에 키를 넣으면 "
+            "데이터가 클라우드 DB에 저장됩니다. 지금은 **게스트 모드(로컬 세션)** 로 진행할 수 있어요."
+        )
+        if st.button("👤 게스트로 시작하기", type="primary", use_container_width=True):
+            st.session_state.auth_user = {
+                "user_id": f"guest_{int(time.time()) % 100000:05d}",
+                "email": "guest@local",
+                "display_name": "게스트",
+            }
+            st.session_state.db_loaded = True
+            st.rerun()
+        return
+
+    tab_login, tab_signup = st.tabs(["🔑 로그인", "📝 회원가입"])
+
+    with tab_login:
+        with st.form("login_form", clear_on_submit=False):
+            email = st.text_input("이메일", key="login_email",
+                                  placeholder="teacher@example.com")
+            password = st.text_input("비밀번호", type="password", key="login_pw")
+            submitted = st.form_submit_button("로그인", type="primary",
+                                              use_container_width=True)
+        if submitted:
+            if not email or not password:
+                st.error("이메일과 비밀번호를 모두 입력해주세요.")
+            else:
+                ok, data = db.sign_in(email.strip(), password)
+                if ok:
+                    st.session_state.auth_user = {
+                        "user_id": data["user_id"],
+                        "email": data["email"],
+                        "display_name": data["email"].split("@")[0],
+                    }
+                    st.session_state.db_loaded = False  # 다음 렌더 때 hydrate
+                    st.success("로그인 성공! 잠시만요...")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(str(data))
+
+    with tab_signup:
+        with st.form("signup_form", clear_on_submit=False):
+            name = st.text_input("표시 이름 (선택)", key="signup_name",
+                                 placeholder="홍길동")
+            email = st.text_input("이메일", key="signup_email",
+                                  placeholder="teacher@example.com")
+            password = st.text_input("비밀번호 (6자 이상)", type="password",
+                                     key="signup_pw")
+            submitted = st.form_submit_button("회원가입", type="primary",
+                                              use_container_width=True)
+        if submitted:
+            if not email or not password:
+                st.error("이메일과 비밀번호를 모두 입력해주세요.")
+            elif len(password) < 6:
+                st.error("비밀번호는 6자 이상이어야 합니다.")
+            else:
+                ok, msg = db.sign_up(email.strip(), password, name.strip())
+                if ok:
+                    st.success(msg + " 이제 [로그인] 탭에서 로그인해주세요.")
+                else:
+                    st.error(str(msg))
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("🤔 회원가입이 꼭 필요한가요?"):
+        st.markdown(
+            "- 로그인하면 메시지/보관함/차단 목록이 **클라우드 DB에 자동 저장**되어, "
+            "기기나 브라우저를 바꿔도 그대로 유지됩니다.\n"
+            "- 교권보호위원회 신고서 생성 시 영구 기록이 증거로 활용됩니다.\n"
+            "- DB 설정이 안 된 환경에서는 **게스트 모드**로 체험만 가능합니다."
+        )
 
 
 # ============================================================
@@ -380,7 +519,8 @@ def page_home():
         if st.button("👩‍🏫 교사로 시작하기 →", key="btn_teacher",
                      use_container_width=True, type="primary"):
             st.session_state.role = "teacher"
-            st.session_state.user_id = "teacher_001"
+            auth_user = st.session_state.get("auth_user") or {}
+            st.session_state.user_id = auth_user.get("user_id", "teacher_001")
             st.rerun()
 
     with col2:
@@ -397,7 +537,10 @@ def page_home():
         if st.button("👨‍👩‍👧 학부모로 시작하기 →", key="btn_parent",
                      use_container_width=True):
             st.session_state.role = "parent"
-            st.session_state.user_id = f"parent_{int(time.time()) % 10000:04d}"
+            auth_user = st.session_state.get("auth_user") or {}
+            st.session_state.user_id = auth_user.get(
+                "user_id", f"parent_{int(time.time()) % 10000:04d}"
+            )
             st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -547,11 +690,19 @@ def _send_parent_message(text: str):
     levels = [m.get("emotion_level", 1) for m in recent if m["role"] == "parent"]
     st.session_state.current_emotion = max(levels) if levels else 1
 
-    st.session_state.chat_messages.append({
+    ai_msg = {
         "role": "ai",
         "text": get_auto_response(analysis),
-        "timestamp": now
-    })
+        "timestamp": now,
+    }
+    st.session_state.chat_messages.append(ai_msg)
+
+    # DB 저장 (실패해도 session_state는 이미 갱신되어 있어 앱은 정상 동작)
+    auth_user = st.session_state.get("auth_user") or {}
+    auth_id = auth_user.get("user_id")
+    if auth_id and db.is_enabled():
+        db.insert_message(auth_id, msg)
+        db.insert_message(auth_id, ai_msg)
 
 
 # ============================================================
@@ -694,7 +845,11 @@ def _tab_archive():
         ca, cb = st.columns(2)
         with ca:
             if st.button(f"🚫 차단", key=f"block_{i}_{msg.get('timestamp','')}"):
-                st.session_state.blocked_users.add(msg.get("user_id", ""))
+                target = msg.get("user_id", "")
+                st.session_state.blocked_users.add(target)
+                auth_user = st.session_state.get("auth_user") or {}
+                if target and auth_user.get("user_id") and db.is_enabled():
+                    db.add_blocked_user(auth_user["user_id"], target)
                 st.success("✅ 차단 완료!")
         with cb:
             if st.button(f"📤 신고서 포함", key=f"report_{i}_{msg.get('timestamp','')}"):
@@ -859,6 +1014,34 @@ def _generate_report_text(teacher_name, school, grade, date, summary, archive):
 def main():
     apply_styles()
     init_session()
+
+    # 1) 로그인 안 됐으면 인증 화면
+    if st.session_state.auth_user is None:
+        page_auth()
+        return
+
+    # 2) 로그인 직후 DB → session_state 1회 동기화
+    _hydrate_from_db()
+
+    # 3) 사이드바 — 사용자 정보 / 로그아웃
+    with st.sidebar:
+        u = st.session_state.auth_user
+        st.markdown(f"### 👤 {u.get('display_name') or u.get('email')}")
+        st.caption(u.get("email", ""))
+        if db.is_enabled():
+            st.success("🟢 Supabase 연결됨")
+        else:
+            st.info("⚪ 게스트 모드 (로컬 세션)")
+        if st.button("🚪 로그아웃", use_container_width=True):
+            db.sign_out()
+            for k in ["auth_user", "role", "user_id", "chat_messages",
+                      "archive", "blocked_users", "current_emotion",
+                      "stats", "db_loaded"]:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
+
+    # 4) 역할 선택 → 각 페이지
     role = st.session_state.role
     if role is None:
         page_home()
