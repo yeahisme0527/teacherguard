@@ -433,16 +433,21 @@ def _hydrate_from_db():
             st.session_state.blocked_users = blocked
 
         # 프로필(학교 정보) 로드
-        ok_p, profile = db.fetch_profile(user["user_id"])
-        if ok_p and profile:
-            user = dict(user)
-            user["school_region"] = profile.get("school_region") or ""
-            user["school_type"]   = profile.get("school_type")   or ""
-            user["school_name"]   = profile.get("school_name")   or ""
-            st.session_state.auth_user = user
-            # 이미 학교가 저장돼 있으면 선택 화면 건너뛰기
-            if profile.get("school_name"):
-                st.session_state.school_selected = True
+        fetch_profile_fn = getattr(db, "fetch_profile", None)
+        if fetch_profile_fn:
+            try:
+                ok_p, profile = fetch_profile_fn(user["user_id"])
+            except Exception:
+                ok_p, profile = False, {}
+            if ok_p and profile:
+                user = dict(user)
+                user["school_region"] = profile.get("school_region") or ""
+                user["school_type"]   = profile.get("school_type")   or ""
+                user["school_name"]   = profile.get("school_name")   or ""
+                st.session_state.auth_user = user
+                # 이미 학교가 저장돼 있으면 선택 화면 건너뛰기
+                if profile.get("school_name"):
+                    st.session_state.school_selected = True
 
     st.session_state.db_loaded = True
 

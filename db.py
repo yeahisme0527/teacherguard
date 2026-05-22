@@ -101,7 +101,9 @@ def sign_out() -> None:
 # 프로필 (학교 정보 등)
 # ============================================================
 def fetch_profile(user_id: str) -> tuple[bool, dict]:
-    """profiles 테이블에서 user_id 에 해당하는 프로필 반환."""
+    """profiles 테이블에서 user_id 에 해당하는 프로필 반환.
+    .single() 대신 .limit(1) 사용 — 행이 없을 때 예외 없이 빈 dict 반환.
+    """
     client = get_client()
     if client is None:
         return False, {}
@@ -110,10 +112,11 @@ def fetch_profile(user_id: str) -> tuple[bool, dict]:
             client.table("profiles")
             .select("*")
             .eq("id", user_id)
-            .single()
+            .limit(1)
             .execute()
         )
-        return True, resp.data or {}
+        rows = resp.data or []
+        return True, rows[0] if rows else {}
     except Exception:
         return False, {}
 
