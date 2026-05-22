@@ -549,6 +549,9 @@ def page_home():
     with c2:
         if hate_model.is_enabled():
             st.success("🤖 AI 탐지 활성")
+            err = st.session_state.get("_hf_last_error")
+            if err:
+                st.caption(f"⚠️ 마지막 API 오류: {err}")
         else:
             st.warning("🔑 AI 탐지 비활성")
 
