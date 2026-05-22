@@ -1147,6 +1147,10 @@ def main():
             st.success("🟢 Supabase 연결됨")
         else:
             st.info("⚪ 게스트 모드 (로컬 세션)")
+        if hate_model.is_enabled():
+            st.success("🤖 AI 탐지 활성")
+        else:
+            st.warning("🔑 AI 탐지 비활성 (HF 토큰 필요)")
         if st.button("🚪 로그아웃", use_container_width=True):
             db.sign_out()
             for k in ["auth_user", "role", "user_id", "chat_messages",
