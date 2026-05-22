@@ -46,7 +46,7 @@ def apply_styles():
     }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    [data-testid="stToolbar"] {visibility: hidden;}
 
     .yellow-page {
         background: linear-gradient(160deg, #FFFDE7 0%, #FFF9C4 60%, #FFF176 100%);
@@ -538,6 +538,20 @@ def page_home():
     """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # 연결 상태 한눈에 보기
+    c1, c2 = st.columns(2)
+    with c1:
+        if db.is_enabled():
+            st.success("🟢 DB 연결됨")
+        else:
+            st.info("⚪ 게스트 모드")
+    with c2:
+        if hate_model.is_enabled():
+            st.success("🤖 AI 탐지 활성")
+        else:
+            st.warning("🔑 AI 탐지 비활성")
+
     st.markdown("### 💡 역할을 선택해주세요")
 
     col1, col2 = st.columns(2)
