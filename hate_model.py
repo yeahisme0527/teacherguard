@@ -57,7 +57,7 @@ def _parse_response(data) -> list[tuple[str, float]] | None:
     return None
 
 
-def classify(text: str, threshold: float = 0.35) -> dict | None:
+def classify(text: str, threshold: float = 0.25) -> dict | None:
     """text 를 kor_unsmile 로 분류.
 
     반환: {
