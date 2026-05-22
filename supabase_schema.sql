@@ -8,11 +8,19 @@
 -- 1. profiles : auth.users 에 1:1로 붙는 프로필 테이블
 -- ------------------------------------------------------------
 create table if not exists public.profiles (
-    id           uuid primary key references auth.users(id) on delete cascade,
-    email        text not null,
-    display_name text,
-    created_at   timestamptz not null default now()
+    id            uuid primary key references auth.users(id) on delete cascade,
+    email         text not null,
+    display_name  text,
+    school_region text,   -- 시도 (예: 서울, 경기)
+    school_type   text,   -- 학교급 (예: 초등학교, 중학교, 고등학교)
+    school_name   text,   -- 학교명 (예: 서울고등학교)
+    created_at    timestamptz not null default now()
 );
+
+-- 기존 DB에 컬럼이 없는 경우 추가 (이미 있으면 무시)
+alter table public.profiles add column if not exists school_region text;
+alter table public.profiles add column if not exists school_type   text;
+alter table public.profiles add column if not exists school_name   text;
 
 -- ------------------------------------------------------------
 -- 2. messages : 채팅 메시지 (학부모 발송 + AI 응답)

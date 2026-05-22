@@ -98,6 +98,46 @@ def sign_out() -> None:
 
 
 # ============================================================
+# 프로필 (학교 정보 등)
+# ============================================================
+def fetch_profile(user_id: str) -> tuple[bool, dict]:
+    """profiles 테이블에서 user_id 에 해당하는 프로필 반환."""
+    client = get_client()
+    if client is None:
+        return False, {}
+    try:
+        resp = (
+            client.table("profiles")
+            .select("*")
+            .eq("id", user_id)
+            .single()
+            .execute()
+        )
+        return True, resp.data or {}
+    except Exception:
+        return False, {}
+
+
+def update_profile(user_id: str, **fields) -> tuple[bool, Any]:
+    """profiles 테이블의 school_region / school_type / school_name 등 업데이트."""
+    client = get_client()
+    if client is None:
+        return False, "DB 미설정"
+    if not fields:
+        return True, {}
+    try:
+        resp = (
+            client.table("profiles")
+            .update(fields)
+            .eq("id", user_id)
+            .execute()
+        )
+        return True, resp.data
+    except Exception as e:
+        return False, str(e)
+
+
+# ============================================================
 # 메시지
 # ============================================================
 def insert_message(user_id: str, msg: dict) -> tuple[bool, Any]:

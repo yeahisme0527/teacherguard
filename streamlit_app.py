@@ -16,6 +16,7 @@ import time
 
 import db          # Supabase 연동 (없으면 자동으로 session_state 폴백)
 import hate_model  # kor_unsmile 혐오표현 탐지 (없으면 키워드 탐지로 폴백)
+import schools     # NEIS 공공 API 기반 전국 학교 검색
 
 # 한국 표준시(KST). Streamlit Cloud 서버는 UTC라서 시간 판정이 어긋남 → KST로 고정.
 KST = timezone(timedelta(hours=9))
@@ -388,6 +389,7 @@ def init_session():
         "stats": {"total": 0, "profanity": 0,
                   "types": {t: 0 for t in ABUSE_TYPES.keys()}},
         "db_loaded": False,         # 로그인 직후 DB → session_state 1회 동기화 플래그
+        "school_selected": False,   # 교사 학교 선택 완료 여부
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -429,6 +431,18 @@ def _hydrate_from_db():
         ok_b, blocked = db.fetch_blocked_users(user["user_id"])
         if ok_b:
             st.session_state.blocked_users = blocked
+
+        # 프로필(학교 정보) 로드
+        ok_p, profile = db.fetch_profile(user["user_id"])
+        if ok_p and profile:
+            user = dict(user)
+            user["school_region"] = profile.get("school_region") or ""
+            user["school_type"]   = profile.get("school_type")   or ""
+            user["school_name"]   = profile.get("school_name")   or ""
+            st.session_state.auth_user = user
+            # 이미 학교가 저장돼 있으면 선택 화면 건너뛰기
+            if profile.get("school_name"):
+                st.session_state.school_selected = True
 
     st.session_state.db_loaded = True
 
@@ -524,6 +538,129 @@ def page_auth():
             "- 교권보호위원회 신고서 생성 시 영구 기록이 증거로 활용됩니다.\n"
             "- DB 설정이 안 된 환경에서는 **게스트 모드**로 체험만 가능합니다."
         )
+
+
+# ============================================================
+# 페이지 1-A: 학교 선택 (교사 전용 — 첫 로그인 시 한 번)
+# ============================================================
+def _save_school(region: str, school_type: str, school_name: str) -> None:
+    """학교 정보를 session_state 와 DB 에 저장."""
+    user = dict(st.session_state.auth_user or {})
+    user["school_region"] = region
+    user["school_type"]   = school_type
+    user["school_name"]   = school_name
+    st.session_state.auth_user = user
+    st.session_state.school_selected = True
+
+    if db.is_enabled() and user.get("user_id"):
+        db.update_profile(
+            user["user_id"],
+            school_region=region,
+            school_type=school_type,
+            school_name=school_name,
+        )
+    st.rerun()
+
+
+def page_school_select() -> None:
+    """교사가 처음 로그인할 때 자신의 학교를 선택하는 화면."""
+    st.markdown("""
+    <div style="text-align:center; padding:30px 0 10px;">
+        <div style="font-size:64px;">🏫</div>
+        <h2 style="font-size:26px; font-weight:800; color:#1a1a2e; margin:8px 0 4px;">
+            내 학교 선택
+        </h2>
+        <p style="color:#666; font-size:14px;">
+            선생님의 학교를 선택하면 교권보호 신고서에 자동으로 반영됩니다.<br>
+            나중에 사이드바 → 학교 변경에서도 수정 가능합니다.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 1단계: 지역 + 학교급 ────────────────────────────────────
+    c1, c2 = st.columns(2)
+    with c1:
+        region = st.selectbox(
+            "📍 시도 선택",
+            options=["선택해주세요"] + schools.get_regions(),
+            key="sch_region",
+        )
+    with c2:
+        school_type = st.selectbox(
+            "🏫 학교급 선택",
+            options=["선택해주세요"] + schools.get_school_types(),
+            key="sch_type",
+        )
+
+    school_name = ""
+
+    # ── 2단계: 학교명 ───────────────────────────────────────────
+    if region != "선택해주세요" and school_type != "선택해주세요":
+
+        if school_type == "어린이집":
+            st.info("어린이집은 공공 데이터 미지원 — 직접 입력해주세요.")
+            school_name = st.text_input(
+                "어린이집 이름", key="sch_name_manual",
+                placeholder="예: 햇살어린이집"
+            )
+
+        elif schools.is_api_enabled():
+            # NEIS API 사용 — 검색어로 필터링
+            search_q = st.text_input(
+                "🔍 학교명 검색",
+                key="sch_search",
+                placeholder="학교명 일부를 입력하세요 (예: 서울, 한국, 중앙)",
+            )
+            with st.spinner("학교 목록 불러오는 중..."):
+                school_list = schools.search_schools(region, school_type, search_q)
+
+            if school_list:
+                selected = st.selectbox(
+                    f"학교 선택 ({len(school_list):,}개 검색됨)",
+                    options=["선택해주세요"] + school_list,
+                    key="sch_name_api",
+                )
+                school_name = "" if selected == "선택해주세요" else selected
+            else:
+                if search_q:
+                    st.warning("검색 결과가 없어요. 다른 검색어를 시도해보세요.")
+                school_name = st.text_input(
+                    "학교명 직접 입력",
+                    key="sch_name_direct",
+                    placeholder="예: 서울고등학교",
+                )
+
+        else:
+            # API 키 없음 — 직접 입력
+            st.markdown(
+                "> 💡 **NEIS API 키를 등록하면** 학교 목록에서 바로 검색할 수 있어요.  \n"
+                "> 등록 방법: [NEIS Open API](https://open.neis.go.kr/portal/guide/apiRegisterV2.do) → "
+                "`secrets.toml` `[neis] key = \"...\"` 추가"
+            )
+            school_name = st.text_input(
+                "학교명 직접 입력",
+                key="sch_name_text",
+                placeholder="예: 경기고등학교",
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── 버튼 ────────────────────────────────────────────────────
+    btn_save, btn_skip = st.columns([3, 2])
+    with btn_save:
+        can_save = bool(
+            school_name.strip()
+            and region != "선택해주세요"
+            and school_type != "선택해주세요"
+        )
+        if st.button("✅ 저장하고 시작하기", type="primary",
+                     use_container_width=True, disabled=not can_save):
+            _save_school(region, school_type, school_name.strip())
+
+    with btn_skip:
+        if st.button("⏭️ 나중에 설정", use_container_width=True):
+            st.session_state.school_selected = True
+            st.rerun()
 
 
 # ============================================================
@@ -1169,6 +1306,17 @@ def main():
         u = st.session_state.auth_user
         st.markdown(f"### 👤 {u.get('display_name') or u.get('email')}")
         st.caption(u.get("email", ""))
+
+        # 학교 정보 표시 (교사)
+        school_nm = u.get("school_name", "")
+        if school_nm:
+            st.info(f"🏫 {u.get('school_region','')} {school_nm}")
+        elif st.session_state.get("role") == "teacher":
+            if st.button("🏫 학교 설정", use_container_width=True, key="sb_school_btn"):
+                st.session_state.school_selected = False
+                st.rerun()
+
+        st.divider()
         if db.is_enabled():
             st.success("🟢 Supabase 연결됨")
         else:
@@ -1177,11 +1325,15 @@ def main():
             st.success("🤖 AI 탐지 활성")
         else:
             st.warning("🔑 AI 탐지 비활성 (HF 토큰 필요)")
+        if schools.is_api_enabled():
+            st.success("🔎 NEIS 학교 검색 활성")
+
+        st.divider()
         if st.button("🚪 로그아웃", use_container_width=True):
             db.sign_out()
             for k in ["auth_user", "role", "user_id", "chat_messages",
                       "archive", "blocked_users", "current_emotion",
-                      "stats", "db_loaded"]:
+                      "stats", "db_loaded", "school_selected"]:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
@@ -1193,7 +1345,11 @@ def main():
     elif role == "parent":
         page_parent()
     elif role == "teacher":
-        page_teacher()
+        # 교사 첫 로그인 시 학교 선택 단계 삽입
+        if not st.session_state.get("school_selected"):
+            page_school_select()
+        else:
+            page_teacher()
 
 
 if __name__ == "__main__":
