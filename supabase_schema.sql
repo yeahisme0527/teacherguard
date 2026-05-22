@@ -21,6 +21,10 @@ create table if not exists public.profiles (
 alter table public.profiles add column if not exists school_region text;
 alter table public.profiles add column if not exists school_type   text;
 alter table public.profiles add column if not exists school_name   text;
+alter table public.profiles add column if not exists invite_code   text unique; -- 교사 초대코드 (6자리)
+
+alter table public.messages  add column if not exists room_id uuid; -- 교사의 user_id (방 식별자)
+create index if not exists messages_room_id_idx on public.messages (room_id);
 
 -- ------------------------------------------------------------
 -- 2. messages : 채팅 메시지 (학부모 발송 + AI 응답)

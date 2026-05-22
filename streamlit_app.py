@@ -390,6 +390,8 @@ def init_session():
                   "types": {t: 0 for t in ABUSE_TYPES.keys()}},
         "db_loaded": False,         # 로그인 직후 DB → session_state 1회 동기화 플래그
         "school_selected": False,   # 교사 학교 선택 완료 여부
+        "teacher_room_id": None,    # 학부모가 연결된 교사 user_id
+        "teacher_info": {},         # 연결된 교사 정보 {"display_name", "school_name", ...}
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -406,7 +408,9 @@ def _hydrate_from_db():
         st.session_state.db_loaded = True
         return
 
-    ok_msgs, msgs = db.fetch_messages(limit=200)
+    # 교사는 자신의 방(room_id = user_id) 메시지 로드
+    _uid = (st.session_state.auth_user or {}).get("user_id", "")
+    ok_msgs, msgs = db.fetch_room_messages(_uid, limit=200)
     if ok_msgs and msgs:
         st.session_state.chat_messages = msgs
 
@@ -543,6 +547,77 @@ def page_auth():
             "- 교권보호위원회 신고서 생성 시 영구 기록이 증거로 활용됩니다.\n"
             "- DB 설정이 안 된 환경에서는 **게스트 모드**로 체험만 가능합니다."
         )
+
+
+# ============================================================
+# 페이지 1-P: 학부모 코드 입력 (교사 방 입장)
+# ============================================================
+def page_parent_connect() -> None:
+    """학부모가 교사 초대코드를 입력해 해당 교사 방에 입장하는 화면."""
+    st.markdown("""
+    <div style="text-align:center; padding:30px 0 10px;">
+        <div style="font-size:64px;">🔑</div>
+        <h2 style="font-size:26px; font-weight:800; color:#1a1a2e; margin:8px 0 4px;">
+            교사 초대코드 입력
+        </h2>
+        <p style="color:#666; font-size:14px;">
+            담임·담당 선생님께 받은 <b>6자리 코드</b>를 입력하세요.<br>
+            코드는 교사 대시보드에서 확인할 수 있습니다.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    code_input = st.text_input(
+        "초대코드 (6자리)",
+        placeholder="예: A1B2C3",
+        max_chars=6,
+        key="parent_invite_code",
+    )
+    code = (code_input or "").upper().strip()
+
+    # 실시간 미리보기: 6자 입력되면 교사 조회
+    teacher_preview = None
+    if len(code) == 6 and db.is_enabled():
+        with st.spinner("코드 확인 중..."):
+            ok, teacher = db.fetch_teacher_by_code(code)
+        if ok and teacher:
+            teacher_preview = teacher
+            school_str = ""
+            if teacher.get("school_region") or teacher.get("school_name"):
+                school_str = f"{teacher.get('school_region','')} {teacher.get('school_name','')}".strip()
+            st.success(
+                f"✅ **{teacher.get('display_name', '선생님')}** "
+                f"{'(' + school_str + ')' if school_str else ''} 채팅방을 찾았어요!"
+            )
+        elif len(code) == 6:
+            st.error("❌ 코드를 찾을 수 없습니다. 선생님께 다시 확인해주세요.")
+
+    elif len(code) == 6 and not db.is_enabled():
+        # 게스트 모드 — DB 없이 로컬로만
+        teacher_preview = {
+            "id": "guest_teacher",
+            "display_name": "선생님(게스트)",
+            "school_name": "",
+        }
+        st.info("⚪ 게스트 모드 — 코드 검증 없이 임시 입장합니다.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button(
+        "🚪 채팅방 입장",
+        type="primary",
+        use_container_width=True,
+        disabled=(teacher_preview is None),
+    ):
+        st.session_state.teacher_room_id = teacher_preview["id"]
+        st.session_state.teacher_info    = teacher_preview
+        # 이 방의 기존 메시지 로드
+        if db.is_enabled() and teacher_preview["id"] != "guest_teacher":
+            ok2, msgs = db.fetch_room_messages(teacher_preview["id"])
+            if ok2:
+                st.session_state.chat_messages = msgs
+        st.rerun()
 
 
 # ============================================================
@@ -758,14 +833,22 @@ def page_home():
 # 페이지 2: 학부모 채팅
 # ============================================================
 def page_parent():
+    # 연결된 교사 정보 배너
+    t_info = st.session_state.get("teacher_info") or {}
+    t_name = t_info.get("display_name", "선생님")
+    t_school = t_info.get("school_name", "")
+    banner_txt = f"🏫 **{t_school + ' ' if t_school else ''}{t_name}** 채팅방"
+    st.info(banner_txt)
+
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
-        st.markdown(f"### 💬 학부모 채팅방")
-        st.caption(f"ID: {st.session_state.user_id}  |  "
-                   f"{'🌙 운영시간 외 (18:00 이후)' if is_after_hours() else '🟢 운영시간 중'}")
+        st.markdown("### 💬 학부모 채팅방")
+        st.caption(f"{'🌙 운영시간 외 (18:00 이후)' if is_after_hours() else '🟢 운영시간 중'}")
     with col_h2:
         if st.button("🚪 나가기"):
             st.session_state.role = None
+            st.session_state.teacher_room_id = None
+            st.session_state.teacher_info = {}
             st.session_state.chat_messages = []
             st.rerun()
 
@@ -886,6 +969,7 @@ def _send_parent_message(text: str):
     blurred = blur_text(text) if analysis["is_profanity"] else text
     blocked = analysis["emotion_level"] >= 4
 
+    room_id = st.session_state.get("teacher_room_id")
     msg = {
         "role": "parent",
         "text": text,
@@ -894,7 +978,8 @@ def _send_parent_message(text: str):
         "analysis": analysis,
         "emotion_level": analysis["emotion_level"],
         "timestamp": now,
-        "user_id": st.session_state.user_id
+        "user_id": st.session_state.user_id,
+        "room_id": room_id,
     }
     st.session_state.chat_messages.append(msg)
 
@@ -915,6 +1000,7 @@ def _send_parent_message(text: str):
         "role": "ai",
         "text": get_auto_response(analysis),
         "timestamp": now,
+        "room_id": room_id,
     }
     st.session_state.chat_messages.append(ai_msg)
 
@@ -922,36 +1008,45 @@ def _send_parent_message(text: str):
     auth_user = st.session_state.get("auth_user") or {}
     auth_id = auth_user.get("user_id")
     if auth_id and db.is_enabled():
-        db.insert_message(auth_id, msg)
-        db.insert_message(auth_id, ai_msg)
+        db.insert_message(auth_id, msg, room_id=room_id)
+        db.insert_message(auth_id, ai_msg, room_id=room_id)
 
 
 def _send_teacher_reply(text: str):
-    """교사가 학부모에게 직접 보내는 답장."""
+    """교사가 학부모에게 직접 보내는 답장. room_id = 교사 본인 user_id."""
     now = now_kst().strftime("%H:%M")
+    auth_user = st.session_state.get("auth_user") or {}
+    auth_id = auth_user.get("user_id")
     msg = {
         "role": "teacher",
         "text": text,
         "timestamp": now,
         "user_id": st.session_state.user_id,
+        "room_id": auth_id,  # 교사의 방 = 교사 본인 ID
     }
     st.session_state.chat_messages.append(msg)
 
-    auth_user = st.session_state.get("auth_user") or {}
-    auth_id = auth_user.get("user_id")
     if auth_id and db.is_enabled():
-        db.insert_message(auth_id, msg)
+        db.insert_message(auth_id, msg, room_id=auth_id)
 
 
 def _reload_messages_from_db():
-    """DB에서 채팅/보관함을 다시 불러와 session_state를 갱신한다.
-    쌍방대화에서 상대가 보낸 새 메시지를 받아오는 용도.
-    """
+    """DB에서 채팅/보관함을 다시 불러와 session_state를 갱신한다."""
     if not db.is_enabled():
         return
-    ok, msgs = db.fetch_messages(limit=200)
-    if ok:
-        st.session_state.chat_messages = msgs
+    role = st.session_state.get("role")
+    if role == "parent":
+        room_id = st.session_state.get("teacher_room_id")
+        if room_id:
+            ok, msgs = db.fetch_room_messages(room_id)
+            if ok:
+                st.session_state.chat_messages = msgs
+    else:
+        auth_id = (st.session_state.get("auth_user") or {}).get("user_id")
+        if auth_id:
+            ok, msgs = db.fetch_room_messages(auth_id)
+            if ok:
+                st.session_state.chat_messages = msgs
     ok2, arc = db.fetch_archive()
     if ok2:
         st.session_state.archive = arc
@@ -963,12 +1058,27 @@ def _reload_messages_from_db():
 def page_teacher():
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
-        st.markdown("### 👩‍🏫 교사 대시보드")
-        st.caption(f"ID: {st.session_state.user_id}  |  {now_kst().strftime('%Y-%m-%d %H:%M')}")
+        u = st.session_state.auth_user or {}
+        school_nm = u.get("school_name", "")
+        title = f"👩‍🏫 {school_nm + ' ' if school_nm else ''}교사 대시보드"
+        st.markdown(f"### {title}")
+        st.caption(now_kst().strftime("%Y-%m-%d %H:%M"))
     with col_h2:
         if st.button("🚪 나가기"):
             st.session_state.role = None
             st.rerun()
+
+    # 초대코드 배너
+    auth_id = (st.session_state.auth_user or {}).get("user_id")
+    if auth_id and db.is_enabled():
+        ok_c, invite_code = db.get_or_create_invite_code(auth_id)
+    else:
+        ok_c, invite_code = False, "XXXXXX"
+    st.info(
+        f"📤 **내 초대코드: `{invite_code}`** — "
+        "학부모에게 이 코드를 공유하면 이 채팅방에 입장할 수 있습니다.",
+        icon="🔑",
+    )
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["🌡️ 실시간 모니터", "📥 보관함", "📊 통계/리포트", "📄 신고서 생성"])
@@ -1338,7 +1448,8 @@ def main():
             db.sign_out()
             for k in ["auth_user", "role", "user_id", "chat_messages",
                       "archive", "blocked_users", "current_emotion",
-                      "stats", "db_loaded", "school_selected"]:
+                      "stats", "db_loaded", "school_selected",
+                      "teacher_room_id", "teacher_info"]:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
@@ -1348,7 +1459,11 @@ def main():
     if role is None:
         page_home()
     elif role == "parent":
-        page_parent()
+        # 교사 방에 연결됐는지 확인
+        if not st.session_state.get("teacher_room_id"):
+            page_parent_connect()
+        else:
+            page_parent()
     elif role == "teacher":
         # 교사 첫 로그인 시 학교 선택 단계 삽입
         if not st.session_state.get("school_selected"):

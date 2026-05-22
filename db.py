@@ -98,6 +98,81 @@ def sign_out() -> None:
 
 
 # ============================================================
+# 초대코드 (교사 ↔ 학부모 연결)
+# ============================================================
+def get_or_create_invite_code(user_id: str) -> tuple[bool, str]:
+    """교사의 초대코드 반환. 없으면 6자리 코드를 생성해서 저장."""
+    import secrets as _sec
+    client = get_client()
+    if client is None:
+        return False, ""
+    try:
+        resp = (
+            client.table("profiles")
+            .select("invite_code")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        existing = rows[0].get("invite_code") if rows else None
+        if existing:
+            return True, existing
+
+        # 새 코드 생성 (헷갈리는 0·1·I·O 제외)
+        chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        for _ in range(5):
+            code = "".join(_sec.choice(chars) for _ in range(6))
+            try:
+                client.table("profiles").update({"invite_code": code}).eq("id", user_id).execute()
+                return True, code
+            except Exception:
+                continue
+        return False, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def fetch_teacher_by_code(code: str) -> tuple[bool, dict]:
+    """초대코드(6자리)로 교사 프로필 조회."""
+    client = get_client()
+    if client is None:
+        return False, {}
+    try:
+        resp = (
+            client.table("profiles")
+            .select("id, email, display_name, school_region, school_type, school_name, invite_code")
+            .eq("invite_code", code.upper().strip())
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        return (True, rows[0]) if rows else (False, {})
+    except Exception:
+        return False, {}
+
+
+def fetch_room_messages(room_id: str, limit: int = 200) -> tuple[bool, list]:
+    """특정 교사 방(room_id = 교사 user_id)의 메시지 조회."""
+    client = get_client()
+    if client is None:
+        return False, []
+    try:
+        resp = (
+            client.table("messages")
+            .select("*")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = list(reversed(resp.data or []))
+        return True, [_row_to_msg(r) for r in rows]
+    except Exception:
+        return False, []
+
+
+# ============================================================
 # 프로필 (학교 정보 등)
 # ============================================================
 def fetch_profile(user_id: str) -> tuple[bool, dict]:
@@ -143,9 +218,11 @@ def update_profile(user_id: str, **fields) -> tuple[bool, Any]:
 # ============================================================
 # 메시지
 # ============================================================
-def insert_message(user_id: str, msg: dict) -> tuple[bool, Any]:
+def insert_message(user_id: str, msg: dict,
+                   room_id: Optional[str] = None) -> tuple[bool, Any]:
     """msg 는 streamlit_app 에서 만든 dict 그대로.
     sender_role 은 msg['role'] 을 사용.
+    room_id  : 교사의 user_id (학부모→교사 방 연결 키).
     """
     client = get_client()
     if client is None:
@@ -154,6 +231,7 @@ def insert_message(user_id: str, msg: dict) -> tuple[bool, Any]:
         analysis = msg.get("analysis", {}) or {}
         row = {
             "user_id": user_id,
+            "room_id": room_id or msg.get("room_id"),
             "sender_role": msg.get("role", "parent"),
             "text": msg.get("text", ""),
             "blurred_text": msg.get("blurred_text"),
