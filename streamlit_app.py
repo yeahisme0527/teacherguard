@@ -9,12 +9,20 @@ import pandas as pd
 import json
 import re
 import sqlite3
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timezone, timedelta
 from pathlib import Path
 from io import BytesIO
 import time
 
 import db  # Supabase 연동 (없으면 자동으로 session_state 폴백)
+
+# 한국 표준시(KST). Streamlit Cloud 서버는 UTC라서 시간 판정이 어긋남 → KST로 고정.
+KST = timezone(timedelta(hours=9))
+
+
+def now_kst() -> datetime:
+    """항상 한국 시간 기준의 현재 시각을 반환."""
+    return datetime.now(KST)
 
 # ============================================================
 # 페이지 설정
@@ -314,7 +322,7 @@ def get_emotion_info(level: int) -> dict:
 
 
 def is_after_hours() -> bool:
-    now = datetime.now().time()
+    now = now_kst().time()
     return now >= dtime(18, 0) or now < dtime(7, 0)
 
 
@@ -661,7 +669,7 @@ def _render_chat_message(msg: dict):
 
 def _send_parent_message(text: str):
     analysis = analyze_message(text)
-    now = datetime.now().strftime("%H:%M")
+    now = now_kst().strftime("%H:%M")
     blurred = blur_text(text) if analysis["is_profanity"] else text
     blocked = analysis["emotion_level"] >= 4
 
@@ -678,7 +686,7 @@ def _send_parent_message(text: str):
     st.session_state.chat_messages.append(msg)
 
     if analysis["is_profanity"]:
-        st.session_state.archive.append({**msg, "archived_at": datetime.now().isoformat()})
+        st.session_state.archive.append({**msg, "archived_at": now_kst().isoformat()})
         st.session_state.stats["profanity"] += 1
         for t in analysis["types_detected"]:
             if t in st.session_state.stats["types"]:
@@ -712,7 +720,7 @@ def page_teacher():
     col_h1, col_h2 = st.columns([4, 1])
     with col_h1:
         st.markdown("### 👩‍🏫 교사 대시보드")
-        st.caption(f"ID: {st.session_state.user_id}  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.caption(f"ID: {st.session_state.user_id}  |  {now_kst().strftime('%Y-%m-%d %H:%M')}")
     with col_h2:
         if st.button("🚪 나가기"):
             st.session_state.role = None
@@ -931,7 +939,7 @@ def _tab_report():
             school_name  = st.text_input("학교명", placeholder="○○초등학교")
         with c2:
             teacher_grade   = st.text_input("담당 학년/반", placeholder="3학년 2반")
-            incident_date   = st.date_input("신고 날짜", datetime.now())
+            incident_date   = st.date_input("신고 날짜", now_kst())
         st.markdown("**📝 신고 내용**")
         incident_summary = st.text_area(
             "사건 경위",
@@ -951,7 +959,7 @@ def _tab_report():
         st.download_button(
             "⬇️ 신고서 다운로드 (.txt)",
             data=report_text.encode("utf-8"),
-            file_name=f"교권침해_신고서_{datetime.now().strftime('%Y%m%d')}.txt",
+            file_name=f"교권침해_신고서_{now_kst().strftime('%Y%m%d')}.txt",
             mime="text/plain",
             use_container_width=True
         )
@@ -1003,7 +1011,7 @@ def _generate_report_text(teacher_name, school, grade, date, summary, archive):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   * 본 신고서는 티쳐가드(TeacherGuard) AI 플랫폼에 의해 자동 생성되었습니다.
-  * 생성 일시 : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+  * 생성 일시 : {now_kst().strftime('%Y-%m-%d %H:%M:%S')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
