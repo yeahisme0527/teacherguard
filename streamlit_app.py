@@ -410,7 +410,11 @@ def _hydrate_from_db():
 
     # 교사는 자신의 방(room_id = user_id) 메시지 로드
     _uid = (st.session_state.auth_user or {}).get("user_id", "")
-    ok_msgs, msgs = db.fetch_room_messages(_uid, limit=200)
+    _fetch_room = getattr(db, "fetch_room_messages", None)
+    if _fetch_room and _uid:
+        ok_msgs, msgs = _fetch_room(_uid, limit=200)
+    else:
+        ok_msgs, msgs = db.fetch_messages(limit=200)  # 구버전 폴백
     if ok_msgs and msgs:
         st.session_state.chat_messages = msgs
 
@@ -613,8 +617,9 @@ def page_parent_connect() -> None:
         st.session_state.teacher_room_id = teacher_preview["id"]
         st.session_state.teacher_info    = teacher_preview
         # 이 방의 기존 메시지 로드
-        if db.is_enabled() and teacher_preview["id"] != "guest_teacher":
-            ok2, msgs = db.fetch_room_messages(teacher_preview["id"])
+        _fetch_room = getattr(db, "fetch_room_messages", None)
+        if db.is_enabled() and teacher_preview["id"] != "guest_teacher" and _fetch_room:
+            ok2, msgs = _fetch_room(teacher_preview["id"])
             if ok2:
                 st.session_state.chat_messages = msgs
         st.rerun()
@@ -1034,19 +1039,25 @@ def _reload_messages_from_db():
     """DB에서 채팅/보관함을 다시 불러와 session_state를 갱신한다."""
     if not db.is_enabled():
         return
+    _fetch_room = getattr(db, "fetch_room_messages", None)
     role = st.session_state.get("role")
-    if role == "parent":
-        room_id = st.session_state.get("teacher_room_id")
-        if room_id:
-            ok, msgs = db.fetch_room_messages(room_id)
-            if ok:
-                st.session_state.chat_messages = msgs
+    if _fetch_room:
+        if role == "parent":
+            room_id = st.session_state.get("teacher_room_id")
+            if room_id:
+                ok, msgs = _fetch_room(room_id)
+                if ok:
+                    st.session_state.chat_messages = msgs
+        else:
+            auth_id = (st.session_state.get("auth_user") or {}).get("user_id")
+            if auth_id:
+                ok, msgs = _fetch_room(auth_id)
+                if ok:
+                    st.session_state.chat_messages = msgs
     else:
-        auth_id = (st.session_state.get("auth_user") or {}).get("user_id")
-        if auth_id:
-            ok, msgs = db.fetch_room_messages(auth_id)
-            if ok:
-                st.session_state.chat_messages = msgs
+        ok, msgs = db.fetch_messages(limit=200)
+        if ok:
+            st.session_state.chat_messages = msgs
     ok2, arc = db.fetch_archive()
     if ok2:
         st.session_state.archive = arc
@@ -1070,8 +1081,9 @@ def page_teacher():
 
     # 초대코드 배너
     auth_id = (st.session_state.auth_user or {}).get("user_id")
-    if auth_id and db.is_enabled():
-        ok_c, invite_code = db.get_or_create_invite_code(auth_id)
+    _get_code = getattr(db, "get_or_create_invite_code", None)
+    if auth_id and db.is_enabled() and _get_code:
+        ok_c, invite_code = _get_code(auth_id)
     else:
         ok_c, invite_code = False, "XXXXXX"
     st.info(
