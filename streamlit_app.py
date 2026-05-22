@@ -14,7 +14,8 @@ from pathlib import Path
 from io import BytesIO
 import time
 
-import db  # Supabase 연동 (없으면 자동으로 session_state 폴백)
+import db          # Supabase 연동 (없으면 자동으로 session_state 폴백)
+import hate_model  # kor_unsmile 혐오표현 탐지 (없으면 키워드 탐지로 폴백)
 
 # 한국 표준시(KST). Streamlit Cloud 서버는 UTC라서 시간 판정이 어긋남 → KST로 고정.
 KST = timezone(timedelta(hours=9))
@@ -244,13 +245,18 @@ def blur_text(text: str) -> str:
     return result
 
 
-def analyze_message(text: str) -> dict:
-    """메시지 분석 — 갑질 7유형 + 심각도"""
+def analyze_message(text: str, use_model: bool = False) -> dict:
+    """메시지 분석 — 갑질 7유형 + 심각도.
+
+    use_model=True 이면 kor_unsmile(HF Inference API)로 한 번 더 검사해
+    키워드로 못 잡는 변형 욕설/혐오표현을 보완한다. (전송 시에만 사용)
+    """
     if not text or not text.strip():
         return {
             "is_profanity": False, "types_detected": [],
             "severity": 1, "emotion_level": 1,
-            "etiquette_warning": None, "detected_keywords": []
+            "etiquette_warning": None, "detected_keywords": [],
+            "model_used": False, "model_labels": []
         }
 
     detected_types = []
@@ -279,6 +285,26 @@ def analyze_message(text: str) -> dict:
         if w in text and max_severity > 1:
             max_severity = min(max_severity + 1, 5)
 
+    # AI 모델(kor_unsmile) 보강 — 키워드가 놓친 욕설/혐오 탐지
+    model_used = False
+    model_labels = []
+    if use_model:
+        model_result = hate_model.classify(text)
+        if model_result is not None:
+            model_used = True
+            model_labels = model_result.get("labels", [])
+            if model_result.get("profanity"):
+                if "욕설/폭언" not in detected_types:
+                    detected_types.append("욕설/폭언")
+                detected_keywords.append("AI탐지:악플/욕설")
+                max_severity = max(max_severity, 4)
+            if model_result.get("hate"):
+                if "모욕/비하" not in detected_types:
+                    detected_types.append("모욕/비하")
+                max_severity = max(max_severity, 3)
+                for cat in model_result.get("hate_categories", []):
+                    detected_keywords.append(f"AI탐지:{cat}")
+
     # 감정 레벨 (1~4)
     if max_severity >= 5:   emotion_level = 4
     elif max_severity >= 4: emotion_level = 3
@@ -302,7 +328,9 @@ def analyze_message(text: str) -> dict:
         "severity": max_severity,
         "emotion_level": emotion_level,
         "etiquette_warning": etiquette_warning,
-        "detected_keywords": list(dict.fromkeys(detected_keywords))
+        "detected_keywords": list(dict.fromkeys(detected_keywords)),
+        "model_used": model_used,
+        "model_labels": model_labels,
     }
 
 
@@ -626,7 +654,9 @@ def page_parent():
                 _send_parent_message(user_input.strip())
                 st.rerun()
     with col_b2:
-        if st.button("🗑️ 지우기", key="clear_msg", use_container_width=True):
+        if st.button("🔄 새로고침", key="refresh_parent", use_container_width=True,
+                     help="선생님의 새 답장을 불러옵니다."):
+            _reload_messages_from_db()
             st.rerun()
 
 
@@ -664,11 +694,26 @@ def _render_chat_message(msg: dict):
             </div>
         </div>
         """, unsafe_allow_html=True)
+    elif msg["role"] == "teacher":
+        st.markdown(f"""
+        <div style="text-align:left; margin:8px 0;">
+            <span style="font-size:11px; color:#999;">👩‍🏫 선생님 &nbsp; {ts}</span><br>
+            <div style="display:inline-block; background:#E8F5E9;
+                 border-radius:18px 18px 18px 5px; padding:10px 16px; max-width:75%;
+                 box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+                {msg["text"]}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     st.markdown("<div style='clear:both;'></div>", unsafe_allow_html=True)
 
 
 def _send_parent_message(text: str):
-    analysis = analyze_message(text)
+    if hate_model.is_enabled():
+        with st.spinner("🤖 AI가 메시지를 분석하고 있어요..."):
+            analysis = analyze_message(text, use_model=True)
+    else:
+        analysis = analyze_message(text, use_model=True)
     now = now_kst().strftime("%H:%M")
     blurred = blur_text(text) if analysis["is_profanity"] else text
     blocked = analysis["emotion_level"] >= 4
@@ -711,6 +756,37 @@ def _send_parent_message(text: str):
     if auth_id and db.is_enabled():
         db.insert_message(auth_id, msg)
         db.insert_message(auth_id, ai_msg)
+
+
+def _send_teacher_reply(text: str):
+    """교사가 학부모에게 직접 보내는 답장."""
+    now = now_kst().strftime("%H:%M")
+    msg = {
+        "role": "teacher",
+        "text": text,
+        "timestamp": now,
+        "user_id": st.session_state.user_id,
+    }
+    st.session_state.chat_messages.append(msg)
+
+    auth_user = st.session_state.get("auth_user") or {}
+    auth_id = auth_user.get("user_id")
+    if auth_id and db.is_enabled():
+        db.insert_message(auth_id, msg)
+
+
+def _reload_messages_from_db():
+    """DB에서 채팅/보관함을 다시 불러와 session_state를 갱신한다.
+    쌍방대화에서 상대가 보낸 새 메시지를 받아오는 용도.
+    """
+    if not db.is_enabled():
+        return
+    ok, msgs = db.fetch_messages(limit=200)
+    if ok:
+        st.session_state.chat_messages = msgs
+    ok2, arc = db.fetch_archive()
+    if ok2:
+        st.session_state.archive = arc
 
 
 # ============================================================
@@ -807,8 +883,39 @@ def _tab_monitor():
         else:
             st.info("📭 아직 수신된 메시지가 없습니다.")
 
-    if st.button("🔄 새로고침", key="refresh_monitor"):
-        st.rerun()
+    # ── 학부모와 직접 대화 (쌍방대화) ───────────────────────────
+    st.divider()
+    col_t1, col_t2 = st.columns([4, 1])
+    with col_t1:
+        st.markdown("#### 💬 학부모와 대화")
+    with col_t2:
+        if st.button("🔄 새로고침", key="refresh_monitor", use_container_width=True):
+            _reload_messages_from_db()
+            st.rerun()
+
+    if st.session_state.chat_messages:
+        for m in st.session_state.chat_messages[-20:]:
+            _render_chat_message(m)
+    else:
+        st.markdown(
+            "<div style='text-align:center; color:#bbb; padding:20px;'>"
+            "아직 학부모 메시지가 없습니다.</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("##### ✏️ 답장 보내기")
+    teacher_reply = st.text_area(
+        "답장 입력",
+        placeholder="예) 안녕하세요 어머님, 말씀해주신 부분 확인했습니다. 내일 자세히 안내드리겠습니다.",
+        height=90, key="teacher_reply_input", label_visibility="collapsed",
+    )
+    if st.button("📤 답장 전송", key="send_teacher_reply",
+                 use_container_width=True, type="primary"):
+        if teacher_reply.strip():
+            _send_teacher_reply(teacher_reply.strip())
+            st.rerun()
+        else:
+            st.warning("답장 내용을 입력해주세요.")
 
 
 def _tab_archive():

@@ -72,6 +72,32 @@ streamlit run streamlit_app.py
 
 ---
 
+## 6단계 · (선택) HuggingFace 혐오표현 탐지 모델 켜기
+
+키워드 탐지만으로는 변형 욕설·신조어를 놓칠 수 있어,
+`smilegate-ai/kor_unsmile` 한국어 혐오표현 AI 모델을 추가로 쓸 수 있습니다.
+**이 단계는 건너뛰어도 앱은 정상 동작**하며, 그 경우 키워드 탐지만 사용합니다.
+
+1. https://huggingface.co 가입/로그인
+2. https://huggingface.co/settings/tokens 접속 → **New token**
+   - Type/권한: **Read** 면 충분
+   - 생성된 토큰(`hf_...`) 복사
+3. `.streamlit/secrets.toml` 에 아래 섹션 추가:
+
+   ```toml
+   [huggingface]
+   token = "hf_여기에_복사한_토큰"
+   ```
+
+4. Streamlit Cloud 배포 시에는 **Settings → Secrets** 에도 같은 내용을 추가
+5. 학부모가 메시지를 **전송**할 때 AI 모델이 한 번 더 검사합니다
+   (입력 중 실시간 미리보기는 키워드 탐지만 사용 → API 호출 최소화)
+
+> 💡 처음 호출 시 모델이 깨어나는 데 10~20초 걸릴 수 있습니다(콜드 스타트).
+> 토큰이 없거나 호출이 실패하면 자동으로 키워드 탐지로 폴백됩니다.
+
+---
+
 ## 데이터 구조 한 줄 요약
 
 | 테이블 | 무엇을 저장하나요 |
