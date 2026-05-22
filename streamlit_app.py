@@ -691,9 +691,13 @@ def _render_chat_message(msg: dict):
             </div>
             """, unsafe_allow_html=True)
         else:
+            analysis = msg.get("analysis", {})
+            model_badge = ""
+            if analysis.get("model_used"):
+                model_badge = ' &nbsp;<span style="background:#E8F5E9;color:#2E7D32;font-size:10px;padding:2px 6px;border-radius:10px;">🤖 AI</span>'
             st.markdown(f"""
             <div style="text-align:right; margin:8px 0;">
-                <span style="font-size:11px; color:#999;">{ts} &nbsp; {emotion_info['char']}</span><br>
+                <span style="font-size:11px; color:#999;">{ts} &nbsp; {emotion_info['char']}{model_badge}</span><br>
                 <div class="msg-bubble-parent" style="display:inline-block; text-align:left;">
                     {blurred}
                 </div>
